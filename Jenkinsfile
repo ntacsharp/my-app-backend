@@ -1,10 +1,33 @@
 pipeline {
-    agent any
+    agent {
+        kubernetes {
+            yaml '''
+            apiVersion: v1
+            kind: Pod
+            spec:
+                containers:
+                - name: docker
+                  image: docker:latest
+                  command:
+                  - cat
+                  tty: true
+                  volumeMounts:
+                  - name: docker-sock
+                    mountPath: /var/run/docker.sock
+                - name: jnlp
+                  image: jenkins/inbound-agent:latest
+                volumes:
+                - name: docker-sock
+                  hostPath:
+                    path: /var/run/docker.sock
+            '''
+        }
+    }
 
     environment {
         IMAGE_NAME = 'tuanasanh/my-app-backend-image'
-        DOCKERHUB_CREDENTIALS = '6ca79578-df2d-4da9-9041-b7ee15a6a300'
-        GITHUB_CREDENTIALS = '6a37d77f-827f-402f-83ba-57957d4e6bec' 
+        DOCKER_HUB_CREDENTIALS = 'dockerhub_cre'
+        GITHUB_CREDENTIALS = 'github_cre' 
         DEPLOY_REPO_URL = 'github.com/ntacsharp/my-app-deploy.git'
     }
 
@@ -64,39 +87,50 @@ pipeline {
 
         stage('Check Docker') {
             steps {
-                script {
-                    echo "Checking Docker"
+                container('docker'){
+                    script {
+                        echo "Checking Docker"
 
-                    def dockerExists = sh(script: 'which docker || echo "not_found"', returnStdout: true).trim()
+                        sh '''
+                            echo ">> PATH: $PATH"
+                            echo ">> Check docker binary:"
+                        '''
 
-                    if (dockerExists == 'not_found') {
-                        error "Docker is not installed or is not in PATH."
+                        sh 'echo "Running in container: $(hostname)"'
+
+                        def dockerExists = sh(script: 'which docker || echo "not_found"', returnStdout: true).trim()
+
+                        if (dockerExists == 'not_found') {
+                            error "Docker is not installed or is not in PATH."
+                        }
+                        def dockerVersion = sh(script: 'docker version --format "{{.Server.Version}}" || echo "unavailable"', returnStdout: true).trim()
+
+                        if (dockerVersion == 'unavailable' || dockerVersion == '') {
+                            error "Docker daemon is not running or Jenkins cannot access Docker socket."
+                        }
+
+                        echo "Docker version: ${dockerVersion}"
                     }
-                    def dockerVersion = sh(script: 'docker version --format "{{.Server.Version}}" || echo "unavailable"', returnStdout: true).trim()
-
-                    if (dockerVersion == 'unavailable' || dockerVersion == '') {
-                        error "Docker daemon is not running or Jenkins cannot access Docker socket."
-                    }
-
-                    echo "Docker version: ${dockerVersion}"
                 }
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                script {
-                    echo "Building Docker image..."
+                container('docker'){
+                    script {
+                        echo "Building Docker image..."
 
-                    if (!env.TAG_NAME) {
-                        error "Tag_name not found"
+                        if (!env.TAG_NAME) {
+                            error "Tag_name not found"
+                        }
+
+                        sh """
+                            docker build -t ${env.IMAGE_NAME}:${env.TAG_NAME} .
+                        """
+
+                        echo "Image ${env.IMAGE_NAME}:${env.TAG_NAME} built successfully"
                     }
-
-                    sh """
-                        docker build -t ${env.IMAGE_NAME}:${env.TAG_NAME} .
-                    """
-
-                    echo "Image ${env.IMAGE_NAME}:${env.TAG_NAME} built successfully"
                 }
             }
         }
@@ -104,26 +138,28 @@ pipeline {
 
         stage('Push Docker Image to Docker Hub') {
             steps {
-                script {
-                    echo "Pushing to Docker Hub..."
+                container('docker'){
+                    script {
+                        echo "Pushing to Docker Hub..."
 
-                    if (!env.TAG_NAME || !env.IMAGE_NAME) {
-                        error "TAG_NAME or IMAGE_NAME not found."
+                        if (!env.TAG_NAME || !env.IMAGE_NAME) {
+                            error "TAG_NAME or IMAGE_NAME not found."
+                        }
+
+                        withCredentials([usernamePassword(
+                            credentialsId: env.DOCKER_HUB_CREDENTIALS,
+                            usernameVariable: 'DOCKER_USER',
+                            passwordVariable: 'DOCKER_PASS'
+                        )]) {
+                            sh """
+                                echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                                docker push ${env.IMAGE_NAME}:${env.TAG_NAME}
+                                docker logout
+                            """
+                        }
+
+                        echo "Successfully pushed Docker image: ${env.IMAGE_NAME}:${env.TAG_NAME}"
                     }
-
-                    withCredentials([usernamePassword(
-                        credentialsId: env.DOCKER_HUB_CREDENTIALS,
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS'
-                    )]) {
-                        sh """
-                            echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
-                            docker push ${env.IMAGE_NAME}:${env.TAG_NAME}
-                            docker logout
-                        """
-                    }
-
-                    echo "Successfully pushed Docker image: ${env.IMAGE_NAME}:${env.TAG_NAME}"
                 }
             }
         }
@@ -157,10 +193,10 @@ pipeline {
             }
         }
 
-        stage('Update Frontend Image Tag in Deploy Repo') {
+        stage('Update Backend Image Tag in Deploy Repo') {
             steps {
                 script {
-                    echo "Updating frontend image tag in values.yaml"
+                    echo "Updating backend image tag in values.yaml"
 
                     def valuesFile = 'cloned-deploy-repo/values.yaml'
 
@@ -168,9 +204,14 @@ pipeline {
                         error "File ${valuesFile} not found!"
                     }
 
+                    sh "cat cloned-deploy-repo/values.yaml | grep -A5 backend"
+
+
                     sh """
-                        sed -i 's/\\(backend:\\s*\\n\\s*image:\\s*\\n\\s*repository:.*\\n\\s*tag:\\s*\\).*$/\\1"${env.TAG_NAME}"/' ${valuesFile}
+                        sed -i '/backend:/,/^[^ ]/s/\\(tag:\\s*\\)".*"/\\1"${env.TAG_NAME}"/' cloned-deploy-repo/values.yaml
                     """
+
+                    sh "cat cloned-deploy-repo/values.yaml | grep -A5 backend"
 
                     echo "Updated tag to ${env.TAG_NAME} in values.yaml"
                 }
@@ -207,15 +248,14 @@ pipeline {
     post {
         always {
             echo "Cleaning up Docker resources and Jenkins workspace..."
-
-            sh """
-                echo "Removing Docker images..."
-                docker rmi ${env.IMAGE_NAME}:${env.TAG_NAME} || true
-
-                echo "Pruning unused Docker resources..."
-                docker system prune -f || true
-            """
-
+            
+            container('docker'){
+                sh """
+                    docker rmi ${env.IMAGE_NAME}:${env.TAG_NAME} || true
+                    docker system prune -f || true
+                """
+            }
+            
             echo "Cleaning Jenkins workspace..."
             cleanWs()
         }
