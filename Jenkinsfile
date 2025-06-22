@@ -234,13 +234,18 @@ pipeline {
                                 git config user.name "CI Jenkins"
 
                                 git add values.yaml
-                                git commit -m "Update backend image tag to ${env.TAG_NAME}"
-                                git push https://${GIT_USERNAME}:${GIT_PASSWORD}@${DEPLOY_REPO_URL} HEAD:master
+
+                                if git diff --cached --quiet; then
+                                    echo "✅ No changes to commit"
+                                else
+                                    git commit -m "Update backend image tag to ${env.TAG_NAME}"
+                                    git push https://${GIT_USERNAME}:${GIT_PASSWORD}@${DEPLOY_REPO_URL} HEAD:master
+                                fi
                             """
                         }
                     }
 
-                    echo "Pushed updated values.yaml to deploy repo"
+                    echo "Pushed (or skipped) updated values.yaml to deploy repo"
                 }
             }
         }
