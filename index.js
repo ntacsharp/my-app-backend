@@ -2,7 +2,7 @@ const express = require('express');
 const client = require('prom-client');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const { authenticateToken, requireRole } = require('./auth/middleware');
+const { authenticateToken, requireRole, apiLimiter } = require('./auth/middleware');
 
 const app = express();
 const port = 5000;
@@ -23,6 +23,8 @@ app.use((req, res, next) => {
   requestCounter.labels(req.path, req.method).inc();
   next();
 });
+
+app.use('/api', apiLimiter);
 
 // Fake users
 const users = [

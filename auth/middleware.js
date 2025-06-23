@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const secretKey = process.env.JWT_SECRET || 'my-secret-key';
+const rateLimit = require('express-rate-limit');
 
 // ✅ Xác thực token
 function authenticateToken(req, res, next) {
@@ -25,7 +26,18 @@ function requireRole(...roles) {
   };
 }
 
+// Rate limiter (10 req/min)
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  keyGenerator: req => req.user?.username || req.ip,
+  handler: (req, res) => {
+    res.status(409).json({ message: 'Too many requests - please wait.' });
+  }
+});
+
 module.exports = {
   authenticateToken,
   requireRole,
+  apiLimiter,
 };
